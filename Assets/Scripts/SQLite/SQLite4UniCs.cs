@@ -8,14 +8,15 @@ using Unity.VisualScripting;
 using System.Runtime.InteropServices;
 using static UnityEditor.ShaderData;
 
-public class SQLite : MonoBehaviour
+public class SQLite4UniCs : MonoBehaviour
 {
     // Start is called before the first frame update
     void Start()
     {
         string pass = Application.dataPath + "/StreamingAssets/" + "existing2.db";
-        /*
-        Create(pass,
+        Create(pass, new TestClass());
+
+        Insert(pass,
         new[]{
             new TestClass
             {
@@ -29,8 +30,8 @@ public class SQLite : MonoBehaviour
                 Name = "test2",
             }
         });
-        */
-        Create(pass, new TestClass());
+
+
     }
 
     // Update is called once per frame
@@ -38,12 +39,6 @@ public class SQLite : MonoBehaviour
     {
     }
 
-    public void Test<T>(string pass,T[] obj) 
-    {
-        
-
-        
-    }
 
     public void Create<T>(string pass, T obj)
     {
@@ -62,22 +57,22 @@ public class SQLite : MonoBehaviour
         }
 
         string query = $"CREATE TABLE {databaseStructure.Name} (";
-        
-        foreach(var columns in databaseStructure.Columns.Select((value,index) => (value,index)))
+
+        foreach (var columns in databaseStructure.Columns.Select((value, index) => (value, index)))
         {
             query += $"{columns.value.property.name} ";
 
-            switch (columns.value.property.type) 
+            switch (columns.value.property.type)
             {
-                case Type t when t == typeof(int) :
+                case Type t when t == typeof(int):
                     query += "integer ";
                     break;
 
-                case Type t when t == typeof(double) :
+                case Type t when t == typeof(double):
                     query += "real ";
                     break;
 
-                case Type t when t == typeof(float) :
+                case Type t when t == typeof(float):
                     query += "real ";
                     break;
 
@@ -90,7 +85,7 @@ public class SQLite : MonoBehaviour
             {
                 switch (attribute)
                 {
-                    case Type a when a == typeof(AutoIncrementAttribute) :
+                    case Type a when a == typeof(AutoIncrementAttribute):
                         query += "autoincrement ";
                         break;
 
@@ -104,7 +99,7 @@ public class SQLite : MonoBehaviour
                 }
             }
 
-            if(databaseStructure.Columns.Count -1 > columns.index)
+            if (databaseStructure.Columns.Count - 1 > columns.index)
                 query += ", ";
         }
         query += ")";
@@ -113,15 +108,91 @@ public class SQLite : MonoBehaviour
 
         //データベースへの接続の終了
         sqlite3_close(_db);
-        return; 
+        return;
     }
 
-    public void Insert<T>(T[] obj)
+    public void Insert<T>(string pass, T[] obj)
     {
         DatabaseStructure databaseStructure = GetClassProperty(obj);
-        Debug.Log(databaseStructure);
-    }
+        //Debug.Log(databaseStructure);
 
+        //データベースへの接続の開始
+        if (sqlite3_open(pass, out _db) != 0)
+        {
+            Debug.LogError("Failed to open database");
+            return;
+        }
+        else
+        {
+            Debug.Log("データベースへの接続を開始しました");
+        }
+
+        string query = $"INSERT INTO {databaseStructure.Name} (";
+        string queryColumns = null;
+        string queryValue = "values";
+
+        foreach (var columns in databaseStructure.Columns.Select((value, index) => (value, index)))
+        {
+            queryColumns += $"{columns.value.property.name} ";
+
+            if (databaseStructure.Columns.Count - 1 > columns.index)
+                queryColumns += ", ";
+            else queryColumns += ")";
+        }
+
+        int i = 0;
+        foreach (var dbValues in databaseStructure.Value)
+        {
+            queryValue += "(";
+
+            foreach (var dbValue in dbValues.Select((value, index) => (value, index)))
+            {
+                if (dbValue.value == null)
+                {
+                    queryValue += "NULL";
+                }
+                else
+                {
+
+                    switch (dbValue.value.GetType())
+                    {
+                        case Type v when v == typeof(int):
+                            queryValue += dbValue.value.ToString();
+                            break;
+
+                        case Type v when v == typeof(double):
+                            queryValue += dbValue.value.ToString();
+                            break;
+
+                        case Type v when v == typeof(float):
+                            queryValue += dbValue.value.ToString();
+                            break;
+
+                        case Type v when v == typeof(string):
+                            queryValue += $"\"{dbValue.value.ToString()}\"";
+                            break;
+
+                    }
+                }
+                if (dbValues.Count - 1 > dbValue.index)
+                    queryValue += ", ";
+                else queryValue += ")";
+
+            }
+            if (databaseStructure.Value.Count - 1 > i)
+                queryValue += ", ";
+
+            i++;
+        }
+
+        query = $"{query} {queryColumns} {queryValue}";
+        Debug.Log(query);
+        ExecuteQuery(query);
+
+        //データベースへの接続の終了
+        sqlite3_close(_db);
+        return;
+    }
 
     /// <summary>
     /// データベース構造を定義したクラスを要素に持つ配列から、型・変数名・値を取得します
@@ -134,8 +205,9 @@ public class SQLite : MonoBehaviour
     private DatabaseStructure GetClassProperty<T>(T[] obj)
     {
         DatabaseStructure databaseStructure = new DatabaseStructure();
+        int i = 0;
 
-        foreach (var row in obj.Select((value,index) => (value,index)))
+        foreach (var row in obj.Select((value, index) => (value, index)))
         {
             Type t = row.value.GetType();
             PropertyInfo[] properties = t.GetProperties();
@@ -151,11 +223,14 @@ public class SQLite : MonoBehaviour
                 {
                     attributesName.Add(attribute.GetType());
                 }
-                databaseStructure.Columns.Add(((property.value.Name, property.value.PropertyType ), attributesName));
+                if (i == 0)
+                    databaseStructure.Columns.Add(((property.value.Name, property.value.PropertyType), attributesName));
+                else { }
             }
             databaseStructure.Value.Add(values);
 
             databaseStructure.Name = t.Name;
+            i++;
         }
 
         return databaseStructure;
@@ -187,10 +262,10 @@ public class SQLite : MonoBehaviour
         public string Name { get; set; } = null;
 
         /// <summary>カラム情報&lt;[カラム名,データ型],属性&lt;&gt;&gt;</summary>
-        public List<((string name,Type type) property, List<Type> attributes)> Columns { get; set; } = new List<((string,Type), List<Type>)>();
+        public List<((string name, Type type) property, List<Type> attributes)> Columns { get; set; } = new List<((string, Type), List<Type>)>();
 
         /// <summary>値</summary>
-        public List<List<object>> Value { get; set; } = new List<List<object>> ();
+        public List<List<object>> Value { get; set; } = new List<List<object>>();
     }
 
     /// <summary>値を自動生成する属性 </summary>
@@ -201,7 +276,7 @@ public class SQLite : MonoBehaviour
 
     /// <summary>nullを許可しない属性</summary>
     public class NotNullAttribute : Attribute { }
-    
+
 
     /* SQLiteのDLL接続関係の設定 */
     [DllImport("sqlite3", EntryPoint = "sqlite3_open")]
@@ -265,5 +340,5 @@ public class SQLite : MonoBehaviour
         public int ID { get; set; }
         public string Value { get; set; }
     }
-    #endif
+#endif
 }
