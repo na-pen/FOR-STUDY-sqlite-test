@@ -7,16 +7,20 @@ using System.Linq;
 using Unity.VisualScripting;
 using System.Runtime.InteropServices;
 using static UnityEditor.ShaderData;
+using System.Runtime.CompilerServices;
+using static SQLite4Cs;
+using UnityEngine.UIElements;
 
-public class SQLite4UniCs : MonoBehaviour
+public class SQLite4Cs : MonoBehaviour
 {
     // Start is called before the first frame update
     void Start()
     {
         string pass = Application.dataPath + "/StreamingAssets/" + "existing2.db";
-        Create(pass, new TestClass());
+        Open(pass);
+        Create(new TestClass());
 
-        Insert(pass,
+        Insert(
         new[]{
             new TestClass
             {
@@ -31,6 +35,9 @@ public class SQLite4UniCs : MonoBehaviour
             }
         });
 
+        TestClass result = new TestClass();
+        SelectFrom(result,new string[]{ "ID","Name"});
+        Close();
 
     }
 
@@ -39,13 +46,8 @@ public class SQLite4UniCs : MonoBehaviour
     {
     }
 
-
-    public void Create<T>(string pass, T obj)
+    public void Open(string pass)
     {
-        DatabaseStructure databaseStructure = GetClassProperty(new T[] { obj });
-        //Debug.Log(databaseStructure);
-
-        //データベースへの接続の開始
         if (sqlite3_open(pass, out _db) != 0)
         {
             Debug.LogError("Failed to open database");
@@ -55,6 +57,24 @@ public class SQLite4UniCs : MonoBehaviour
         {
             Debug.Log("データベースへの接続を開始しました");
         }
+        return;
+    }
+
+    public void Close()
+    {
+        //データベースへの接続の終了
+        sqlite3_close(_db);
+        Debug.Log("データベースへの接続を終了しました");
+        return;
+    }
+
+
+    public void Create<T>(T obj)
+    {
+        DatabaseStructure databaseStructure = GetClassProperty(new T[] { obj });
+        //Debug.Log(databaseStructure);
+        Debug.Log($"{_db} @Create");
+
 
         string query = $"CREATE TABLE {databaseStructure.Name} (";
 
@@ -106,26 +126,14 @@ public class SQLite4UniCs : MonoBehaviour
         Debug.Log(query);
         ExecuteQuery(query);
 
-        //データベースへの接続の終了
-        sqlite3_close(_db);
         return;
     }
 
-    public void Insert<T>(string pass, T[] obj)
+    public void Insert<T>(T[] obj)
     {
         DatabaseStructure databaseStructure = GetClassProperty(obj);
         //Debug.Log(databaseStructure);
-
-        //データベースへの接続の開始
-        if (sqlite3_open(pass, out _db) != 0)
-        {
-            Debug.LogError("Failed to open database");
-            return;
-        }
-        else
-        {
-            Debug.Log("データベースへの接続を開始しました");
-        }
+        Debug.Log($"{_db} @Insert");
 
         string query = $"INSERT INTO {databaseStructure.Name} (";
         string queryColumns = null;
@@ -169,7 +177,7 @@ public class SQLite4UniCs : MonoBehaviour
                             break;
 
                         case Type v when v == typeof(string):
-                            queryValue += $"\"{dbValue.value.ToString()}\"";
+                            queryValue += $"\"{dbValue.value}\"";
                             break;
 
                     }
@@ -189,10 +197,21 @@ public class SQLite4UniCs : MonoBehaviour
         Debug.Log(query);
         ExecuteQuery(query);
 
-        //データベースへの接続の終了
-        sqlite3_close(_db);
         return;
     }
+
+    public SQLite4Cs SelectFrom<T>(T resultTable, string[] selectColumn)
+    {
+        Debug.Log($"{_db} @SelectFrom");
+
+        string query = $"SELECT {String.Join(",",selectColumn)} FROM {resultTable.GetType().Name}";
+
+        Debug.Log(query);
+        ExecuteQuery(query);
+        return this;
+    }
+
+
 
     /// <summary>
     /// データベース構造を定義したクラスを要素に持つ配列から、型・変数名・値を取得します
@@ -239,11 +258,32 @@ public class SQLite4UniCs : MonoBehaviour
     private void ExecuteQuery(string query)
     {
         IntPtr errMsg;
-        if (sqlite3_exec(_db, query, IntPtr.Zero, IntPtr.Zero, out errMsg) != 0)
+        var temp = sqlite3_exec(_db, query, IntPtr.Zero, IntPtr.Zero, out errMsg);
+        if (temp != 0)
         {
             string error = Marshal.PtrToStringAnsi(errMsg);
             Debug.LogError("SQLite error: " + error);
         }
+        Debug.Log("test");
+    }
+
+    private void ExecuteQueryStep(string query)
+    {
+        IntPtr stmt;
+        if (sqlite3_prepare_v2(_db, query, query.Length, out stmt, IntPtr.Zero) != 0)
+        {
+            Debug.LogError("Failed to prepare statement");
+            return;
+        }
+
+        while (sqlite3_step(stmt) == 100) // SQLITE_ROW = 100
+        {
+            IntPtr textPtr = sqlite3_column_text(stmt, 1); // Assuming the second column is 'name'
+            string name = Marshal.PtrToStringAnsi(textPtr);
+            Debug.Log("Name: " + name);
+        }
+
+        sqlite3_finalize(stmt);
     }
 
 
@@ -252,6 +292,17 @@ public class SQLite4UniCs : MonoBehaviour
         [PrimaryKey, AutoIncrement]
         public int ID { get; set; }
         public string Name { get; set; }
+
+        public List<string> columnList { get; set; }
+
+        public TestClass()
+        {
+            columnList = this.GetType()
+                 .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                 .Select(p => p.Name)
+                 .ToArray().ToList();
+            columnList.Remove("columnList");
+        }
     }
 
 
@@ -326,6 +377,7 @@ public class SQLite4UniCs : MonoBehaviour
 
     //データベースの接続を表すポインタ
     private IntPtr _db;
+    
 
 
 
@@ -339,6 +391,11 @@ public class SQLite4UniCs : MonoBehaviour
         [AutoIncrement, PrimaryKey]
         public int ID { get; set; }
         public string Value { get; set; }
+
+        public string[] ColumnList()
+        {
+            return new string[0];
+        }
     }
 #endif
 }
