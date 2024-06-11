@@ -1,15 +1,9 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using System.Linq;
-using Unity.VisualScripting;
 using System.Runtime.InteropServices;
-using static UnityEditor.ShaderData;
-using System.Runtime.CompilerServices;
-using static SQLite4Cs;
-using UnityEngine.UIElements;
 
 public class SQLite4Cs : MonoBehaviour
 {
@@ -17,6 +11,8 @@ public class SQLite4Cs : MonoBehaviour
     void Start()
     {
         string pass = Application.dataPath + "/StreamingAssets/" + "existing2.db";
+        TestClass result = new TestClass();
+        Debug.Log(result.TableName);
         Open(pass);
         Create(new TestClass());
 
@@ -34,10 +30,9 @@ public class SQLite4Cs : MonoBehaviour
                 Name = "test2",
             }
         });
-
-        TestClass result = new TestClass();
-        SelectFrom(result,new string[]{ "ID","Name"});
+        
         Close();
+        
 
     }
 
@@ -67,41 +62,39 @@ public class SQLite4Cs : MonoBehaviour
         Debug.Log("データベースへの接続を終了しました");
         return;
     }
-
-
-    public void Create<T>(T obj)
+    
+    public void Create<T>(T obj) where T : Database
     {
-        DatabaseStructure databaseStructure = GetClassProperty(new T[] { obj });
-        //Debug.Log(databaseStructure);
+        obj.__Init__(obj);
         Debug.Log($"{_db} @Create");
 
 
-        string query = $"CREATE TABLE {databaseStructure.Name} (";
+        string query = $"CREATE TABLE {obj.TableName} (";
 
-        foreach (var columns in databaseStructure.Columns.Select((value, index) => (value, index)))
+        for (int i = 0;i < obj.ColumnName.Count; i++)
         {
-            query += $"{columns.value.property.name} ";
+            query += obj.ColumnName[i] ;
 
-            switch (columns.value.property.type)
+            switch (obj.ColumnType[i])
             {
                 case Type t when t == typeof(int):
-                    query += "integer ";
+                    query += " integer ";
                     break;
 
                 case Type t when t == typeof(double):
-                    query += "real ";
+                    query += " real ";
                     break;
 
                 case Type t when t == typeof(float):
-                    query += "real ";
+                    query += " real ";
                     break;
 
                 case Type t when t == typeof(string):
-                    query += "text ";
+                    query += " text ";
                     break;
             }
 
-            foreach (var attribute in columns.value.attributes)
+            foreach (var attribute in obj.ColumnAttributes[i])
             {
                 switch (attribute)
                 {
@@ -117,9 +110,7 @@ public class SQLite4Cs : MonoBehaviour
                         query += "not null ";
                         break;
                 }
-            }
-
-            if (databaseStructure.Columns.Count - 1 > columns.index)
+            }if (i < obj.ColumnName.Count - 1)
                 query += ", ";
         }
         query += ")";
@@ -129,79 +120,37 @@ public class SQLite4Cs : MonoBehaviour
         return;
     }
 
-    public void Insert<T>(T[] obj)
+
+    public void Insert<T>(T[] obj) where T : Database
     {
-        DatabaseStructure databaseStructure = GetClassProperty(obj);
-        //Debug.Log(databaseStructure);
+        foreach (T a in obj)
+        {
+            a.__Init__(a);
+        }
+
         Debug.Log($"{_db} @Insert");
 
-        string query = $"INSERT INTO {databaseStructure.Name} (";
-        string queryColumns = null;
-        string queryValue = "values";
-
-        foreach (var columns in databaseStructure.Columns.Select((value, index) => (value, index)))
-        {
-            queryColumns += $"{columns.value.property.name} ";
-
-            if (databaseStructure.Columns.Count - 1 > columns.index)
-                queryColumns += ", ";
-            else queryColumns += ")";
-        }
-
-        int i = 0;
-        foreach (var dbValues in databaseStructure.Value)
-        {
-            queryValue += "(";
-
-            foreach (var dbValue in dbValues.Select((value, index) => (value, index)))
-            {
-                if (dbValue.value == null)
-                {
-                    queryValue += "NULL";
-                }
-                else
-                {
-
-                    switch (dbValue.value.GetType())
-                    {
-                        case Type v when v == typeof(int):
-                            queryValue += dbValue.value.ToString();
-                            break;
-
-                        case Type v when v == typeof(double):
-                            queryValue += dbValue.value.ToString();
-                            break;
-
-                        case Type v when v == typeof(float):
-                            queryValue += dbValue.value.ToString();
-                            break;
-
-                        case Type v when v == typeof(string):
-                            queryValue += $"\"{dbValue.value}\"";
-                            break;
-
-                    }
-                }
-                if (dbValues.Count - 1 > dbValue.index)
-                    queryValue += ", ";
-                else queryValue += ")";
-
-            }
-            if (databaseStructure.Value.Count - 1 > i)
-                queryValue += ", ";
-
-            i++;
-        }
-
+        string query = $"INSERT INTO {obj[0].TableName}";
+        string queryColumns = $"( {String.Join(',', obj[0].ColumnName)} )";
+        string queryValue = $"VALUES {string.Join(",", obj.Select(o => $"( {string.Join(',', o.Value)} )"))}";
         query = $"{query} {queryColumns} {queryValue}";
         Debug.Log(query);
         ExecuteQuery(query);
 
         return;
     }
-
+    /*
     public SQLite4Cs SelectFrom<T>(T resultTable, string[] selectColumn)
     {
+        List<string> columnList = this.GetType()
+                 .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                 .Select(p => p.Name)
+                 .ToArray().ToList();
+
+        DatabaseStructure dbStructure = GetClassProperty(new[] { resultTable });
+
+        bool allElementsInB = ListA.All(item => ListB.Contains(item));
+
         Debug.Log($"{_db} @SelectFrom");
 
         string query = $"SELECT {String.Join(",",selectColumn)} FROM {resultTable.GetType().Name}";
@@ -210,51 +159,7 @@ public class SQLite4Cs : MonoBehaviour
         ExecuteQuery(query);
         return this;
     }
-
-
-
-    /// <summary>
-    /// データベース構造を定義したクラスを要素に持つ配列から、型・変数名・値を取得します
-    /// </summary>
-    /// <typeparam name="T">データベースの構造 詳しくは<see cref="TestClass">こちら</see></typeparam>
-    /// <param name="obj">データベース構造を定義したクラスを要素に持つ配列 
-    /// 例えば "TestTable"という構造をもつデータベースの作成や変更を行いたい場合、"TestTable[]"を引数とする必要があります
-    /// </param>
-    /// <returns><see cref="DatabaseStructure">DatabaseStructure</see> を返します</returns>
-    private DatabaseStructure GetClassProperty<T>(T[] obj)
-    {
-        DatabaseStructure databaseStructure = new DatabaseStructure();
-        int i = 0;
-
-        foreach (var row in obj.Select((value, index) => (value, index)))
-        {
-            Type t = row.value.GetType();
-            PropertyInfo[] properties = t.GetProperties();
-
-            List<object> values = new();
-            foreach (var property in properties.Select((value, index) => (value, index)))
-            {
-                values.Add(property.value.GetValue(row.value));
-
-                object[] attributes = property.value.GetCustomAttributes(true);
-                List<Type> attributesName = new();
-                foreach (object attribute in attributes)
-                {
-                    attributesName.Add(attribute.GetType());
-                }
-                if (i == 0)
-                    databaseStructure.Columns.Add(((property.value.Name, property.value.PropertyType), attributesName));
-                else { }
-            }
-            databaseStructure.Value.Add(values);
-
-            databaseStructure.Name = t.Name;
-            i++;
-        }
-
-        return databaseStructure;
-    }
-
+    */
     private void ExecuteQuery(string query)
     {
         IntPtr errMsg;
@@ -264,9 +169,8 @@ public class SQLite4Cs : MonoBehaviour
             string error = Marshal.PtrToStringAnsi(errMsg);
             Debug.LogError("SQLite error: " + error);
         }
-        Debug.Log("test");
     }
-
+    /*
     private void ExecuteQueryStep(string query)
     {
         IntPtr stmt;
@@ -285,39 +189,70 @@ public class SQLite4Cs : MonoBehaviour
 
         sqlite3_finalize(stmt);
     }
-
-
-    public class TestClass
+    */
+    public class TestClass : Database
     {
         [PrimaryKey, AutoIncrement]
-        public int ID { get; set; }
+        public int ID{ get; set; }
         public string Name { get; set; }
 
-        public List<string> columnList { get; set; }
+    }
 
-        public TestClass()
+    public class Database
+    {
+        public string TableName = null;
+        public List<string> ColumnName = new();
+        public List<Type> ColumnType = new();
+        public List<Type[]> ColumnAttributes = new();
+        public List<object> Value = new();
+
+
+        internal void __Init__<T>(T obj)
         {
-            columnList = this.GetType()
-                 .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                 .Select(p => p.Name)
-                 .ToArray().ToList();
-            columnList.Remove("columnList");
+            Type t = obj.GetType();
+            PropertyInfo[] properties = t.GetProperties();
+
+            foreach (var property in properties.Select((value, i) => (value, i)))
+            {
+                object _value = property.value.GetValue(obj);
+                if (_value == null)
+                {
+                    Value.Add("NULL");
+                }
+                else
+                {
+
+                    switch (property.value.PropertyType)
+                    {
+                        case Type v when v == typeof(int):
+                            Value.Add(_value.ToString());
+                            break;
+
+                        case Type v when v == typeof(double):
+                            Value.Add(_value.ToString());
+                            break;
+
+                        case Type v when v == typeof(float):
+                            Value.Add(_value.ToString());
+                            break;
+
+                        case Type v when v == typeof(string):
+                            Value.Add($"\"{_value}\"");
+                            break;
+
+                    }
+                }
+
+                object[] attributes = property.value.GetCustomAttributes(true);
+                ColumnAttributes.Add(attributes.Select(element => element.GetType()).ToArray());
+                ColumnName.Add(property.value.Name);
+                ColumnType.Add(property.value.PropertyType);
+                
+            }
+            TableName = t.Name;
         }
     }
 
-
-    /// <summary>データベースの構造を保存するクラス</summary>
-    public class DatabaseStructure
-    {
-        /// <summary>string テーブル名(クラス名)</summary>
-        public string Name { get; set; } = null;
-
-        /// <summary>カラム情報&lt;[カラム名,データ型],属性&lt;&gt;&gt;</summary>
-        public List<((string name, Type type) property, List<Type> attributes)> Columns { get; set; } = new List<((string, Type), List<Type>)>();
-
-        /// <summary>値</summary>
-        public List<List<object>> Value { get; set; } = new List<List<object>>();
-    }
 
     /// <summary>値を自動生成する属性 </summary>
     public class AutoIncrementAttribute : Attribute { }
