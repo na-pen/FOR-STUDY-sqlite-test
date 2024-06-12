@@ -33,7 +33,7 @@ public class SQLite4Cs : MonoBehaviour
         
         Close();
         
-
+         
     }
 
     // Update is called once per frame
@@ -65,7 +65,7 @@ public class SQLite4Cs : MonoBehaviour
     
     public void Create<T>(T obj) where T : Database
     {
-        obj.__Init__(obj);
+        obj.Parser(obj);
         Debug.Log($"{_db} @Create");
 
 
@@ -125,7 +125,7 @@ public class SQLite4Cs : MonoBehaviour
     {
         foreach (T a in obj)
         {
-            a.__Init__(a);
+            a.Parser(a);
         }
 
         Debug.Log($"{_db} @Insert");
@@ -207,7 +207,7 @@ public class SQLite4Cs : MonoBehaviour
         public List<object> Value = new();
 
 
-        internal void __Init__<T>(T obj)
+        internal void Parser<T>(T obj) where T : Database
         {
             Type t = obj.GetType();
             PropertyInfo[] properties = t.GetProperties();
@@ -247,7 +247,6 @@ public class SQLite4Cs : MonoBehaviour
                 ColumnAttributes.Add(attributes.Select(element => element.GetType()).ToArray());
                 ColumnName.Add(property.value.Name);
                 ColumnType.Add(property.value.PropertyType);
-                
             }
             TableName = t.Name;
         }
