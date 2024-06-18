@@ -11,6 +11,8 @@ using System.Text.RegularExpressions;
 using SQLite4Cs;
 using UnityEditor.Experimental.Rendering;
 using UnityEditor.MemoryProfiler;
+using System.Runtime.CompilerServices;
+using UnityEditor.Search;
 
 
 namespace SQLite4Cs
@@ -127,6 +129,15 @@ namespace SQLite4Cs
             string selectFromQuery = null;
             //string query = null;
             string whereQuery = null;
+            string[] selectColumns = null;
+            private SQLite _sqlite = new();
+            //IntPtr _db;
+
+            public TableOperation()
+            {
+                //_db = db;
+            }
+
             /// <summary>
             /// 
             /// </summary>
@@ -135,7 +146,7 @@ namespace SQLite4Cs
             /// <param name="selectColumn">抽出するカラム名を指定します。大文字、小文字は識別されます。</param>
             /// <returns></returns>
             /// 
-            public TableOperation<T> SelectFrom(string[] selectColumn = null)
+            public TableOperation<T> Select(string[] selectColumn = null)
             {
                 T resultTable = new();
                 selectColumn ??= new string[] { "*" };
@@ -144,44 +155,47 @@ namespace SQLite4Cs
                 bool allElementsInListB = selectColumn.All(element => resultTable.ColumnName.Contains(element));
                 bool noDuplicatesInArrayA = selectColumn.Distinct().Count() == selectColumn.Length;
 
-                selectFromQuery = $"SELECT {String.Join(",", selectColumn)} FROM {resultTable.GetType().Name} ";
+                selectFromQuery = $"SELECT {String.Join(", ", selectColumn)} FROM {resultTable.GetType().Name}";
 
                 if (!allElementsInListB)
                     throw new ArgumentException("The specified column name does not exist in the database.");
                 else if (!noDuplicatesInArrayA)
                     throw new ArgumentException("There is a duplicate in the specified column name.");
 
+                selectColumns = selectColumn;
                 return this;
             }
 
             /*-------------- Where関連 --------------*/
             public TableOperation<T> Where(Expression<Func<T, bool>> predicate)
             {
-                whereQuery = $"WHERE {QueryConv(predicate.Body)} ";
+                whereQuery = $" WHERE {QueryConv(predicate.Body)} ";
                 return this;
             }
 
             public TableOperation<T> And(Expression<Func<T, bool>> predicate)
             {
-                whereQuery += $"AND {QueryConv(predicate.Body)} ";
+                whereQuery += $" AND {QueryConv(predicate.Body)} ";
                 return this;
             }
 
             public TableOperation<T> Or(Expression<Func<T, bool>> predicate)
             {
-                whereQuery += $"OR {QueryConv(predicate.Body)} ";
+                whereQuery += $" OR {QueryConv(predicate.Body)} ";
                 return this;
             }
 
             public TableOperation<T> Not(Expression<Func<T, bool>> predicate)
             {
-                whereQuery += $"NOT {QueryConv(predicate.Body)} ";
+                whereQuery += $" NOT {QueryConv(predicate.Body)} ";
                 return this;
             }
 
-            public string Do()
+            public IList[] Do()
             {
-                return selectFromQuery + whereQuery;
+                IList[] result = _sqlite.ExecuteSelectQuery<T>(selectFromQuery + whereQuery,selectColumns);
+                Debug.Log(selectFromQuery + whereQuery);
+                return result;
             }
             private string QueryConv(Expression predicate)
             {
@@ -199,6 +213,29 @@ namespace SQLite4Cs
                         case (ExpressionType.Equal):
                             returnQuery = $"({left} == {right})";
                             break;
+
+                        case (ExpressionType.NotEqual):
+                            returnQuery = $"({left} != {right}";
+                            break;
+
+                        case (ExpressionType.LessThan):
+                            returnQuery = $"({left} < {right})";
+                            break;
+
+                        case (ExpressionType.GreaterThan):
+                            returnQuery = $"({left} > {right})";
+                            break;
+
+                        case (ExpressionType.LessThanOrEqual):
+                            returnQuery = $"({left} <= {right})";
+                            break;
+
+                        case (ExpressionType.GreaterThanOrEqual):
+                            returnQuery = $"{left} >= {right}";
+                            break;
+
+                        default:
+                            throw new ArgumentException("Unparsable arguments were used.");
 
                     }
                 }
@@ -257,7 +294,7 @@ namespace SQLite4Cs
                 return returnQuery;
             }
 
-            public static string GetDeepestName(Expression expression)
+            private static string GetDeepestName(Expression expression)
             {
                 switch (expression)
                 {
@@ -282,10 +319,10 @@ namespace SQLite4Cs
             }
         }
         //データベースの接続を表すポインタ
-        internal IntPtr _db;
+        private static IntPtr _db;
 
         /*-------------- SQL実行関連 --------------*/
-        internal void ExecuteQuery(string query)
+        private void ExecuteQuery(string query)
         {
             IntPtr errMsg;
             var temp = SQLiteDLL.sqlite3_exec(_db, query, IntPtr.Zero, IntPtr.Zero, out errMsg);
@@ -295,6 +332,148 @@ namespace SQLite4Cs
                 Debug.LogError("SQLite error: " + error);
             }
             query = "";
+        }
+
+        private IList[] ExecuteSelectQuery<T>(string query,string[] selectColumns) where T : Database, new()
+        {
+            IntPtr stmt;
+            int p;
+            (p,stmt) = Prepare_v2(_db, query, out stmt);
+            if (p != 0)
+            {
+                throw new ArgumentException($"Failed to prepare statement {query}");
+            }
+            int columnCount = SQLiteDLL.sqlite3_column_count(stmt);
+
+            int c = 0;
+            Dictionary<string, Type> tableInfo = GetTableInfo<T>();
+            IList[] resultList = new IList[columnCount];
+
+            for (int i = 0; i < columnCount; i++)
+            {
+                Type listType = typeof(List<>).MakeGenericType(tableInfo[selectColumns[i]]);
+                resultList[i] = (IList)Activator.CreateInstance(listType);
+            }
+
+
+            while (SQLiteDLL.sqlite3_step(stmt) == 100) // 継続中 = 100,終了 = 101
+            {
+                
+                for (int i = 0; i < columnCount; i++)
+                {
+                    
+                    
+                    
+                    switch (tableInfo[selectColumns[i]])
+                    {
+                        case Type t when t == typeof(int):
+                            //resultList[i].Add(SQLiteDLL.sqlite3_column_int(stmt, i));
+                            AddElementToList<int>(resultList[i], SQLiteDLL.sqlite3_column_int(stmt, i));
+                            break;
+
+                        case Type t when t == typeof(string):
+                            IntPtr textPtr = SQLiteDLL.sqlite3_column_text(stmt, i);
+                            if (textPtr != IntPtr.Zero)
+                            {
+                                //resultList[i].Add(Marshal.PtrToStringAnsi(textPtr));
+                                AddElementToList<string>(resultList[i], Marshal.PtrToStringAnsi(textPtr));
+                            }
+                            else
+                            {
+                                resultList[i].Add("NULL");
+                            }
+                            break;
+
+                        case Type t when t == typeof(double):
+                            //resultList[i].Add(SQLiteDLL.sqlite3_column_double(stmt, i));
+                            AddElementToList<double>(resultList[i], SQLiteDLL.sqlite3_column_double(stmt, i));
+                            break;
+
+                    }
+                }
+                
+
+                c++;
+            }
+
+            SQLiteDLL.sqlite3_finalize(stmt);
+            return resultList;
+        }
+        private static void AddElementToList<A>(IList list, A element)
+        {
+            if (list is List<A> genericList)
+            {
+                genericList.Add(element);
+            }
+            else
+            {
+                throw new ArgumentException($"The list is not of type List<{typeof(A).Name}>");
+            }
+        }
+
+        private static (int,IntPtr) Prepare_v2(IntPtr db, string query, out IntPtr stmt)
+        {
+            IntPtr queryPtr = IntPtr.Zero;
+            try
+            {
+                byte[] queryBytes = System.Text.Encoding.UTF8.GetBytes(query);
+                queryPtr = Marshal.AllocHGlobal(queryBytes.Length + 1);
+                Marshal.Copy(queryBytes, 0, queryPtr, queryBytes.Length);
+                Marshal.WriteByte(queryPtr, queryBytes.Length, 0);
+
+                return (SQLiteDLL.sqlite3_prepare_v2(db, queryPtr, -1, out stmt, IntPtr.Zero),stmt);
+            }
+            finally
+            {
+                if (queryPtr != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(queryPtr);
+                }
+            }
+        }
+
+        private Dictionary<string, Type> GetTableInfo<T>() where T : Database, new()
+        {
+            T obj = new();
+            obj.Parser(obj);
+
+            IntPtr stmt;
+            int p;
+            string query = $"PRAGMA table_info({obj.TableName});";
+            Dictionary<string,Type> result = new Dictionary<string,Type>();
+            (p, stmt)  = Prepare_v2(_db, query, out stmt);
+            if (p != 0)
+            {
+                throw new ArgumentException($"Failed to prepare statement {query}");
+            }
+            while (SQLiteDLL.sqlite3_step(stmt) == 100)
+            {
+                string columnName = Marshal.PtrToStringUTF8(SQLiteDLL.sqlite3_column_text(stmt, 1));
+                Type columnType = typeof(string);
+                var a = Marshal.PtrToStringUTF8(SQLiteDLL.sqlite3_column_text(stmt, 2));
+                switch (Marshal.PtrToStringUTF8(SQLiteDLL.sqlite3_column_text(stmt, 2)))
+                {
+                    case "INTEGER":
+                        columnType = typeof(int);
+                        break;
+
+                    case "REAL" :
+                        columnType = typeof(double);
+                        break;
+
+                    case "TEXT":
+                        columnType = typeof(string);
+                        break;
+
+                    default:
+                        break;
+                }
+                result.Add(columnName, columnType);
+            }
+
+            // ステートメントを終了し、データベースを閉じる
+            SQLiteDLL.sqlite3_finalize(stmt);
+            return result;
         }
     }
 
@@ -307,8 +486,9 @@ namespace SQLite4Cs
         [DllImport("sqlite3", EntryPoint = "sqlite3_close")]
         internal static extern int sqlite3_close(IntPtr db);
 
-        [DllImport("sqlite3", EntryPoint = "sqlite3_prepare_v2")]
-        internal static extern int sqlite3_prepare_v2(IntPtr db, string zSql, int nByte, out IntPtr ppStmpt, IntPtr pzTail);
+        [DllImport("sqlite3", EntryPoint = "sqlite3_prepare_v2", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int sqlite3_prepare_v2(IntPtr db, IntPtr zSql, int nByte, out IntPtr ppStmpt, IntPtr pzTail);
+
 
         [DllImport("sqlite3", EntryPoint = "sqlite3_step")]
         internal static extern int sqlite3_step(IntPtr stmHandle);
