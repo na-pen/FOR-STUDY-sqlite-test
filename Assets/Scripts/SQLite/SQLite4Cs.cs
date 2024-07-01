@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
@@ -13,6 +14,8 @@ using UnityEditor.Experimental.Rendering;
 using UnityEditor.MemoryProfiler;
 using System.Runtime.CompilerServices;
 using UnityEditor.Search;
+using System.Data.Common;
+using System.Diagnostics;
 
 
 namespace SQLite4Cs
@@ -24,12 +27,12 @@ namespace SQLite4Cs
         {
             if (SQLiteDLL.sqlite3_open(pass, out _db) != 0)
             {
-                Debug.LogError("Failed to open database");
+                //Console.WriteLine("Failed to open database");
                 return;
             }
             else
             {
-                Debug.Log("データベースへの接続を開始しました");
+                //Console.WriteLine("データベースへの接続を開始しました");
             }
             return;
         }
@@ -38,7 +41,7 @@ namespace SQLite4Cs
         {
             //データベースへの接続の終了
             SQLiteDLL.sqlite3_close(_db);
-            Debug.Log("データベースへの接続を終了しました");
+            //Console.WriteLine("データベースへの接続を終了しました");
             return;
         }
 
@@ -88,20 +91,26 @@ namespace SQLite4Cs
                         case Type a when a == typeof(NotNullAttribute):
                             query += "not null ";
                             break;
+
+                        case Type a when a == typeof(UniqueAttribute):
+                            query += "unique ";
+                            break;
+
+                        default:
+                            break;
                     }
                 }
                 if (i < obj.ColumnName.Count - 1)
                     query += ", ";
             }
             query += ")";
-            Debug.Log(query);
+            //Console.WriteLine(query);
             ExecuteQuery(query);
 
             return;
         }
 
-
-        public void Insert<T>(T[] obj) where T : Database, new()
+        public int Insert<T>(T[] obj) where T : Database, new()
         {
             foreach (T a in obj)
             {
@@ -109,13 +118,76 @@ namespace SQLite4Cs
             }
 
             string query = $"INSERT INTO {obj[0].TableName}";
-            string queryColumns = $"( {String.Join(',', obj[0].ColumnName)} )";
-            string queryValue = $"VALUES {string.Join(",", obj.Select(o => $"( {string.Join(',', o.TableValue)} )"))}";
-            query = $"{query} {queryColumns} {queryValue}";
-            Debug.Log(query);
-            ExecuteQuery(query);
+            string queryColumns = null;
+            List<string> columns = new List<string>();
+            string queryValue = "VALUES ";
+            List<string> values = new List<string>();
 
-            return;
+            queryColumns = "( ";
+            for (int i = 0; i < obj[0].ColumnName.Count; i++)
+            {
+                bool isAuto = Array.IndexOf(obj[0].ColumnAttributes[i], typeof(AutoIncrementAttribute)) != -1;
+                if (!isAuto)
+                {
+                    queryColumns += obj[0].ColumnName[i];
+                    columns.Add(obj[0].ColumnName[i]);
+                    if (i != obj[0].ColumnName.Count - 1)
+                        queryColumns += ",";
+                }
+            }
+            queryColumns += " )";
+
+            foreach (var o in obj.Select((value, i) => (value, i)))
+            {
+                queryValue += "(";
+                for (int i = 0; i < o.value.ColumnName.Count; i++)
+                {
+                    bool isAuto = Array.IndexOf(o.value.ColumnAttributes[i], typeof(AutoIncrementAttribute)) != -1;
+                    if (!isAuto)
+                    {
+                        values.Add(o.value.TableValue[i].ToString());
+                        queryValue += " ? ";
+                        if (i != o.value.ColumnName.Count - 1)
+                            queryValue += ", ";
+                    }
+
+                    if (i == o.value.ColumnName.Count - 1)
+                    {
+                        queryValue += ") ";
+                    }
+
+                }
+                if (o.i != obj.Length - 1)
+                    queryValue += ", ";
+            }
+            IntPtr insertStmt;
+            int p;
+
+            string insertQuery = $"{query} {queryColumns} {queryValue}";
+            (p, insertStmt) = Prepare(_db, insertQuery, out insertStmt);
+
+            // バインドする値をShift_JISからUTF-8に変換してバイト配列にする
+            for (int i = 0; i < values.Count; i++)
+            {
+                //System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance); // memo: Shift-JISを扱うためのおまじない
+                byte[] valueBytes = Encoding.Convert(Encoding.GetEncoding("Shift_JIS"), Encoding.UTF8, Encoding.GetEncoding("Shift_JIS").GetBytes(values[i]));
+                SQLiteDLL.sqlite3_bind_text(insertStmt, i + 1, valueBytes, valueBytes.Length, IntPtr.Zero);
+            }
+
+            if (SQLiteDLL.sqlite3_step(insertStmt) != 101 /* SQLITE_DONE */)
+            {
+                Console.WriteLine("Failed to execute insert statement.");
+                Console.WriteLine(Marshal.PtrToStringUTF8(SQLiteDLL.sqlite3_errmsg(_db)));
+            }
+            else
+            {
+                Console.WriteLine("Insert succeeded.");
+            }
+
+            // ステートメントを終了し、データベースを閉じる
+            SQLiteDLL.sqlite3_finalize(insertStmt);
+
+            return 0;
         }
 
 
@@ -127,8 +199,10 @@ namespace SQLite4Cs
         public class TableOperation<T> where T : Database, new()
         {
             string selectFromQuery = null;
-            //string query = null;
             string whereQuery = null;
+            string updateQuery = null;
+            string setQuery = null;
+
             string[] selectColumns = null;
             private SQLite _sqlite = new();
             //IntPtr _db;
@@ -149,33 +223,114 @@ namespace SQLite4Cs
             public TableOperation<T> Select(string[] selectColumn = null)
             {
                 T resultTable = new();
-                selectColumn ??= new string[] { "*" };
                 resultTable.Parser(resultTable);
 
-                bool allElementsInListB = selectColumn.All(element => resultTable.ColumnName.Contains(element));
-                bool noDuplicatesInArrayA = selectColumn.Distinct().Count() == selectColumn.Length;
+                if (selectColumn != null)
+                {
 
+                    bool allElementsInListB = selectColumn.All(element => resultTable.ColumnName.Contains(element));
+                    bool noDuplicatesInArrayA = selectColumn.Distinct().Count() == selectColumn.Length;
+                    if (!allElementsInListB)
+                        throw new ArgumentException("The specified column name does not exist in the database.");
+                    else if (!noDuplicatesInArrayA)
+                        throw new ArgumentException("There is a duplicate in the specified column name.");
+                    selectColumns = selectColumn;
+                }
+                else
+                {
+                    selectColumn ??= new string[] { "*" };
+                    T temp = new();
+                    temp.Parser(temp);
+                    selectColumns = temp.ColumnName.ToArray();
+                }
                 selectFromQuery = $"SELECT {String.Join(", ", selectColumn)} FROM {resultTable.GetType().Name}";
 
-                if (!allElementsInListB)
-                    throw new ArgumentException("The specified column name does not exist in the database.");
-                else if (!noDuplicatesInArrayA)
-                    throw new ArgumentException("There is a duplicate in the specified column name.");
-
-                selectColumns = selectColumn;
                 return this;
             }
 
             /*-------------- Where関連 --------------*/
-            public TableOperation<T> Where(Expression<Func<T, bool>> predicate)
+
+            List<string> whereValues = new List<string>();
+            public TableOperation<T> Where(Expression<Func<T, bool>> predicate = null)
             {
-                whereQuery = $" WHERE {QueryConv(predicate.Body)} ";
+                if (predicate != null)
+                {
+                    whereQuery = $" WHERE {QueryConv(predicate.Body)} ";
+                }
+                else
+                {
+                    whereQuery = $" WHERE ";
+                }
+                return this;
+            }
+            public TableOperation<T> Update()
+            {
+                T table = new();
+                table.Parser(table);
+                updateQuery = $" UPDATE {table.TableName} ";
                 return this;
             }
 
-            public TableOperation<T> And(Expression<Func<T, bool>> predicate)
+            public TableOperation<T> Set(Expression<Func<T, bool>> predicate)
             {
-                whereQuery += $" AND {QueryConv(predicate.Body)} ";
+                T temp = new();
+                temp.Parser(temp);
+                selectColumns = temp.ColumnName.ToArray();
+
+                setQuery += $" SET {QueryConv(predicate.Body)} ";
+                return this;
+            }
+
+            public TableOperation<T> Set(Expression<Func<T, bool>>[] predicates)
+            {
+                T temp = new();
+                temp.Parser(temp);
+                selectColumns = temp.ColumnName.ToArray();
+
+                setQuery += " SET";
+                foreach (var predicate in predicates.Select((value, i) => (value, i)))
+                {
+                    setQuery += $" {QueryConv(predicate.value.Body)} ";
+                    if (predicates.Length - 1 > predicate.i)
+                    {
+                        setQuery += ",";
+                    }
+                }
+                return this;
+            }
+
+            public TableOperation<T> Like(string columnName, string pattern)
+            {
+                whereQuery += $"{columnName} LIKE {pattern}";
+                return this;
+            }
+
+            public TableOperation<T> LikeAnd(string columnName, List<string> strs, bool NisNot = true)
+            {
+                foreach (var str in strs.Select((value, i) => (value, i)))
+                {
+                    if (!NisNot)
+                    {
+                        whereQuery += $"{columnName} NOT LIKE {str.value}";
+                    }
+                    else
+                        whereQuery += $"{columnName} LIKE {str.value}";
+                    if (str.i < strs.Count - 1)
+                        whereQuery += " AND ";
+                }
+                return this;
+            }
+
+            public TableOperation<T> And(Expression<Func<T, bool>> predicate = null)
+            {
+                if (predicate != null)
+                {
+                    whereQuery += $" AND {QueryConv(predicate.Body)} ";
+                }
+                else
+                {
+                    whereQuery += " AND ";
+                }
                 return this;
             }
 
@@ -191,12 +346,40 @@ namespace SQLite4Cs
                 return this;
             }
 
-            public IList[] Do()
+            public List<T> Do()
             {
-                IList[] result = _sqlite.ExecuteSelectQuery<T>(selectFromQuery + whereQuery,selectColumns);
-                Debug.Log(selectFromQuery + whereQuery);
+                List<T> result;
+                string q;
+                if (updateQuery == null)
+                {
+                    q = selectFromQuery + whereQuery;
+                    result = _sqlite.ExecuteSelectQuery<T>(selectFromQuery + whereQuery, selectColumns, whereValues);
+                }
+                else
+                {
+                    q = selectFromQuery + updateQuery + setQuery + whereQuery;
+                    result = _sqlite.ExecuteSelectQuery<T>(selectFromQuery + updateQuery + setQuery + whereQuery, selectColumns, whereValues);
+                }
+
+                //Console.WriteLine(selectFromQuery + whereQuery);
                 return result;
             }
+
+            public List<T> Do(string query, string[] selectColumns)
+            {
+                List<T> result;
+                result = _sqlite.ExecuteSelectQuery<T>(query, selectColumns, whereValues);
+
+                //Console.WriteLine(selectFromQuery + whereQuery);
+                return result;
+            }
+
+            public (string, string[], List<string>) GetQuery()
+            {
+                //var a = selectFromQuery + updateQuery + setQuery + whereQuery;
+                return (selectFromQuery + updateQuery + setQuery + whereQuery, selectColumns, whereValues);
+            }
+
             private string QueryConv(Expression predicate)
             {
                 string returnQuery = null;
@@ -205,29 +388,38 @@ namespace SQLite4Cs
                 if (predicate == null) { }
                 else if (predicate is BinaryExpression)
                 {
+                    StackTrace stackTrace = new StackTrace();
+
+                    // 呼び出し元のメソッドのスタックフレームを取得
+                    StackFrame frame = stackTrace.GetFrame(1);
+
+                    // 呼び出し元のメソッドを取得
+                    var method = frame.GetMethod().Name;
+
+
                     BinaryExpression binary = predicate as BinaryExpression;
                     var left = QueryConv(binary.Left);
                     var right = QueryConv(binary.Right);
                     switch (binary.NodeType)
                     {
                         case (ExpressionType.Equal):
-                            returnQuery = $"({left} == {right})";
+                            returnQuery = $"{left} == {right}";
                             break;
 
                         case (ExpressionType.NotEqual):
-                            returnQuery = $"({left} != {right}";
+                            returnQuery = $"{left} != {right}";
                             break;
 
                         case (ExpressionType.LessThan):
-                            returnQuery = $"({left} < {right})";
+                            returnQuery = $"{left} < {right}";
                             break;
 
                         case (ExpressionType.GreaterThan):
-                            returnQuery = $"({left} > {right})";
+                            returnQuery = $"{left} > {right}";
                             break;
 
                         case (ExpressionType.LessThanOrEqual):
-                            returnQuery = $"({left} <= {right})";
+                            returnQuery = $"{left} <= {right}";
                             break;
 
                         case (ExpressionType.GreaterThanOrEqual):
@@ -237,6 +429,10 @@ namespace SQLite4Cs
                         default:
                             throw new ArgumentException("Unparsable arguments were used.");
 
+                    }
+                    if (method != "Set")
+                    {
+                        returnQuery = $"({returnQuery})";
                     }
                 }
                 else
@@ -255,38 +451,105 @@ namespace SQLite4Cs
 
                         }
                     }
-                    //Whereで(x => ids.Contains(x.ID)等をしたときに当たる
+
                     else if (lambdaExp.Body.NodeType == ExpressionType.MemberAccess)
                     {
                         MemberExpression memberAccess = lambdaExp.Body as MemberExpression;
                         switch (memberAccess.Expression.NodeType)
                         {
                             case ExpressionType.Constant:
-                                Func<object> compiledLambda = Expression.Lambda<Func<object>>(memberAccess).Compile();
+                                Func<object> compiledLambda = null;
+                                try
+                                {
+                                    compiledLambda = Expression.Lambda<Func<object>>(memberAccess).Compile();
+                                }
+                                catch (ArgumentException)
+                                {
+                                    Expression converted = Expression.Convert(memberAccess, typeof(object));
+
+                                    // object型でコンパイル
+                                    compiledLambda = Expression.Lambda<Func<object>>(converted).Compile();
+                                }
+
                                 object obj = compiledLambda();
                                 if (obj is IEnumerable enumerable && !(obj is string))
                                 {
                                     // 配列またはリストの場合、要素をカンマ区切りで結合する
                                     returnQuery = string.Join(", ", enumerable.Cast<object>());
+                                    foreach (var item in enumerable.Cast<object>().Select((value, i) => (value, i)))
+                                    {
+                                        returnQuery += " ? ";
+                                        whereValues.Add(item.value.ToString());
+                                        if (enumerable.Cast<object>().Count() > item.i)
+                                        {
+                                            returnQuery += ",";
+                                        }
+                                    }
                                 }
                                 else
                                 {
                                     // それ以外の場合は、その値をそのまま文字列にする
-                                    returnQuery = obj.ToString();
+                                    Type type = obj.GetType();
+                                    switch (type)
+                                    {
+                                        case Type t when t == typeof(string):
+                                            if (!(obj.ToString().ToString().StartsWith("\"") && obj.ToString().ToString().EndsWith("\"")))
+                                            {
+                                                whereValues.Add(obj.ToString());
+                                                returnQuery = " ? ";
+                                            }
+                                            else
+                                            {
+                                                whereValues.Add(obj.ToString());
+                                                returnQuery = " ? ";
+                                            }
+                                            break;
+
+                                        default:
+                                            Type type0 = obj.GetType();
+                                            returnQuery = " ? ";
+                                            if (type0.Namespace.StartsWith("System"))
+                                            {
+                                                whereValues.Add(obj.ToString());
+                                            }
+                                            break;
+                                    }
 
                                 }
                                 break;
 
                             case ExpressionType.Parameter:
-                                returnQuery = memberAccess.ToSafeString().Replace($"{memberAccess.Expression.ToString()}.", "");
+                                returnQuery = memberAccess.ToString().Replace($"{memberAccess.Expression.ToString()}.", "");
                                 break;
+
+                            case ExpressionType.MemberAccess:
+                                returnQuery = QueryConv(memberAccess.Expression);
+                                break;
+
+                            default:
+                                var temp = memberAccess.Expression.NodeType;
+                                break;
+
                         }
 
                     }
 
                     else if (lambdaExp.Body.NodeType == ExpressionType.Constant)
                     {
-                        returnQuery = lambdaExp.Body.ToString();
+                        Type type = lambdaExp.Body.Type;
+                        switch (type)
+                        {
+                            case Type t when t == typeof(string):
+                                returnQuery = " ? ";
+                                whereValues.Add(lambdaExp.Body.ToString());
+                                break;
+
+                            default:
+                                returnQuery = " ? ";
+                                whereValues.Add(lambdaExp.Body.ToString());
+                                break;
+                        }
+
                     }
                 }
 
@@ -322,82 +585,110 @@ namespace SQLite4Cs
         private static IntPtr _db;
 
         /*-------------- SQL実行関連 --------------*/
-        private void ExecuteQuery(string query)
+        private int ExecuteQuery(string query)
         {
             IntPtr errMsg;
             var temp = SQLiteDLL.sqlite3_exec(_db, query, IntPtr.Zero, IntPtr.Zero, out errMsg);
             if (temp != 0)
             {
                 string error = Marshal.PtrToStringAnsi(errMsg);
-                Debug.LogError("SQLite error: " + error);
+                Console.WriteLine("SQLite error: " + error);
+                return temp;
             }
             query = "";
+            return temp;
         }
 
-        private IList[] ExecuteSelectQuery<T>(string query,string[] selectColumns) where T : Database, new()
+        private List<T> ExecuteSelectQuery<T>(string query, string[] selectColumns, List<string> values) where T : Database, new()
         {
+            List<T> list = new List<T>();
+            if (selectColumns == null)
+            {
+                T temp = new();
+                temp.Parser(temp);
+                selectColumns = temp.ColumnName.ToArray();
+            }
+
             IntPtr stmt;
             int p;
-            (p,stmt) = Prepare_v2(_db, query, out stmt);
+            (p, stmt) = Prepare(_db, query, out stmt);
             if (p != 0)
             {
+                Console.WriteLine(Marshal.PtrToStringUTF8(SQLiteDLL.sqlite3_errmsg(_db)));
                 throw new ArgumentException($"Failed to prepare statement {query}");
             }
+
+            // 値をShift_JISからUTF-8に変換してバイト配列にしてバインドする
+            for (int i = 0; i < values.Count; i++)
+            {
+                //System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance); // memo: Shift-JISを扱うためのおまじない
+                byte[] valueBytes = Encoding.Convert(Encoding.GetEncoding("Shift_JIS"), Encoding.UTF8, Encoding.GetEncoding("Shift_JIS").GetBytes(values[i]));
+                SQLiteDLL.sqlite3_bind_text(stmt, i + 1, valueBytes, valueBytes.Length, IntPtr.Zero);
+            }
+
+
             int columnCount = SQLiteDLL.sqlite3_column_count(stmt);
 
             int c = 0;
             Dictionary<string, Type> tableInfo = GetTableInfo<T>();
-            IList[] resultList = new IList[columnCount];
-
-            for (int i = 0; i < columnCount; i++)
-            {
-                Type listType = typeof(List<>).MakeGenericType(tableInfo[selectColumns[i]]);
-                resultList[i] = (IList)Activator.CreateInstance(listType);
-            }
-
 
             while (SQLiteDLL.sqlite3_step(stmt) == 100) // 継続中 = 100,終了 = 101
             {
-                
+                T row = new();
                 for (int i = 0; i < columnCount; i++)
                 {
-                    
-                    
-                    
                     switch (tableInfo[selectColumns[i]])
                     {
                         case Type t when t == typeof(int):
-                            //resultList[i].Add(SQLiteDLL.sqlite3_column_int(stmt, i));
-                            AddElementToList<int>(resultList[i], SQLiteDLL.sqlite3_column_int(stmt, i));
+                            AssignValuesToPropertie(row, selectColumns[i], SQLiteDLL.sqlite3_column_int(stmt, i));
                             break;
 
                         case Type t when t == typeof(string):
                             IntPtr textPtr = SQLiteDLL.sqlite3_column_text(stmt, i);
                             if (textPtr != IntPtr.Zero)
                             {
-                                //resultList[i].Add(Marshal.PtrToStringAnsi(textPtr));
-                                AddElementToList<string>(resultList[i], Marshal.PtrToStringAnsi(textPtr));
+                                //System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                                byte[] utf8Bytes = Encoding.UTF8.GetBytes(Marshal.PtrToStringUTF8(textPtr));
+
+                                // UTF-8のバイト配列からShift_JISのバイト配列に変換
+                                byte[] shiftJisBytes = Encoding.Convert(Encoding.UTF8, Encoding.GetEncoding("Shift_JIS"), utf8Bytes);
+
+                                // Shift_JISのバイト配列を文字列に変換
+                                string shiftJisString = Encoding.GetEncoding("Shift_JIS").GetString(shiftJisBytes);
+
+                                AssignValuesToPropertie(row, selectColumns[i], shiftJisString);
                             }
                             else
                             {
-                                resultList[i].Add("NULL");
+                                AssignValuesToPropertie(row, selectColumns[i], "NULL");
                             }
                             break;
 
                         case Type t when t == typeof(double):
-                            //resultList[i].Add(SQLiteDLL.sqlite3_column_double(stmt, i));
-                            AddElementToList<double>(resultList[i], SQLiteDLL.sqlite3_column_double(stmt, i));
+                            AssignValuesToPropertie(row, selectColumns[i], SQLiteDLL.sqlite3_column_double(stmt, i));
                             break;
 
                     }
                 }
-                
-
                 c++;
+                list.Add(row);
             }
 
             SQLiteDLL.sqlite3_finalize(stmt);
-            return resultList;
+
+
+            return list;
+        }
+        private static void AssignValuesToPropertie(object target, string propertyName, object value)
+        {
+            Type type = target.GetType();
+
+            PropertyInfo property = type.GetProperty(propertyName);
+            if (property != null && property.CanWrite)
+            {
+                property.SetValue(target, value);
+            }
+
         }
         private static void AddElementToList<A>(IList list, A element)
         {
@@ -411,7 +702,7 @@ namespace SQLite4Cs
             }
         }
 
-        private static (int,IntPtr) Prepare_v2(IntPtr db, string query, out IntPtr stmt)
+        private static (int, IntPtr) Prepare(IntPtr db, string query, out IntPtr stmt)
         {
             IntPtr queryPtr = IntPtr.Zero;
             try
@@ -421,7 +712,7 @@ namespace SQLite4Cs
                 Marshal.Copy(queryBytes, 0, queryPtr, queryBytes.Length);
                 Marshal.WriteByte(queryPtr, queryBytes.Length, 0);
 
-                return (SQLiteDLL.sqlite3_prepare_v2(db, queryPtr, -1, out stmt, IntPtr.Zero),stmt);
+                return (SQLiteDLL.sqlite3_prepare_v2(db, queryPtr, -1, out stmt, IntPtr.Zero), stmt);
             }
             finally
             {
@@ -440,8 +731,8 @@ namespace SQLite4Cs
             IntPtr stmt;
             int p;
             string query = $"PRAGMA table_info({obj.TableName});";
-            Dictionary<string,Type> result = new Dictionary<string,Type>();
-            (p, stmt)  = Prepare_v2(_db, query, out stmt);
+            Dictionary<string, Type> result = new Dictionary<string, Type>();
+            (p, stmt) = Prepare(_db, query, out stmt);
             if (p != 0)
             {
                 throw new ArgumentException($"Failed to prepare statement {query}");
@@ -457,7 +748,7 @@ namespace SQLite4Cs
                         columnType = typeof(int);
                         break;
 
-                    case "REAL" :
+                    case "REAL":
                         columnType = typeof(double);
                         break;
 
@@ -511,9 +802,6 @@ namespace SQLite4Cs
         [DllImport("sqlite3", EntryPoint = "sqlite3_column_int")]
         internal static extern int sqlite3_column_int(IntPtr stmHandle, int iCol);
 
-        [DllImport("sqlite3", EntryPoint = "sqlite3_column_text")]
-        internal static extern IntPtr sqlite3_column_text(IntPtr stmHandle, int iCol);
-
         [DllImport("sqlite3", EntryPoint = "sqlite3_column_double")]
         internal static extern double sqlite3_column_double(IntPtr stmHandle, int iCol);
 
@@ -525,6 +813,16 @@ namespace SQLite4Cs
 
         [DllImport("sqlite3", EntryPoint = "sqlite3_exec")]
         internal static extern int sqlite3_exec(IntPtr db, string sql, IntPtr callback, IntPtr args, out IntPtr errMsg);
+
+        [DllImport("sqlite3", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int sqlite3_bind_text(IntPtr stmt, int index, byte[] value, int n, IntPtr free);
+
+        [DllImport("sqlite3", EntryPoint = "sqlite3_column_text")]
+        internal static extern IntPtr sqlite3_column_text(IntPtr stmHandle, int iCol);
+
+        [DllImport("sqlite3", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int sqlite3_bind_parameter_index(IntPtr stmt, string zName);
+
 
     }
 
@@ -567,7 +865,7 @@ namespace SQLite4Cs
                             break;
 
                         case Type v when v == typeof(string):
-                            TableValue.Add($"\"{_value}\"");
+                            TableValue.Add(_value);
                             break;
 
                     }
@@ -593,6 +891,8 @@ namespace SQLite4Cs
     /// <summary>nullを許可しない属性</summary>
     public class NotNullAttribute : Attribute { }
 
+    /// <summary>重複を許可しない属性</summary>
+    public class UniqueAttribute : Attribute { }
 }
 
 
